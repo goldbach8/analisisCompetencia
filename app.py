@@ -3,17 +3,14 @@ import pandas as pd
 import re
 import os
 
-# Configuración y constantes
 DB_FILE = "master_database.csv"
 REQUIRED_COLUMNS_BASE = [
     "Fecha", "Importador", "País de Origen", "País de Procedencia", 
-    "Unitario Divisa", "FOB Divisa", "Marca o Descripcion"
+    "Moneda Divisa", "Unitario Divisa", "FOB Divisa", "Marca o Descripcion",
+    "Marca - Sufijos"
 ]
 
 def extract_and_clean_code(text):
-    """
-    Extrae el código de producto aplicando expresiones regulares y limpia caracteres especiales.
-    """
     if pd.isna(text):
         return None
     
@@ -32,14 +29,12 @@ def extract_and_clean_code(text):
     return cleaned_code
 
 def load_database():
-    """Carga la base de datos principal."""
     if os.path.exists(DB_FILE):
         df = pd.read_csv(DB_FILE, parse_dates=["Fecha"])
         return df
     return pd.DataFrame(columns=REQUIRED_COLUMNS_BASE + ["Cantidad", "CodigoProducto"])
 
 def save_database(df):
-    """Guarda la base de datos principal."""
     df.to_csv(DB_FILE, index=False)
 
 st.set_page_config(page_title="Softrade Analytics", layout="wide")
@@ -47,7 +42,6 @@ st.title("Gestor de Archivos Softrade")
 
 tab_carga, tab_consulta = st.tabs(["Carga de Datos", "Consulta de Productos"])
 
-# --- PESTAÑA 1: CARGA DE DATOS ---
 with tab_carga:
     st.header("Carga y Procesamiento de Archivos Excel")
     uploaded_files = st.file_uploader("Sube uno o más archivos Softrade (.xlsx, .csv)", type=["xlsx", "csv"], accept_multiple_files=True)
@@ -82,7 +76,6 @@ with tab_carga:
                     df_temp = df_temp[columnas_mantener].copy()
                     df_temp = df_temp.rename(columns={col_cantidad_objetivo: "Cantidad"})
                     
-                    # Conversión a numérico y casteo a entero (sin decimales)
                     df_temp["Cantidad"] = pd.to_numeric(df_temp["Cantidad"], errors='coerce').fillna(0).astype(int)
                     df_temp["Unitario Divisa"] = pd.to_numeric(df_temp["Unitario Divisa"], errors='coerce').fillna(0)
                     
@@ -110,7 +103,6 @@ with tab_carga:
         else:
             st.warning("Por favor, sube al menos un archivo.")
 
-# --- PESTAÑA 2: CONSULTA ---
 with tab_consulta:
     st.header("Consulta de Resumen por Producto")
     db_df = load_database()
@@ -150,40 +142,45 @@ with tab_consulta:
                     
                     st.subheader("Resumen General")
                     
-                    idx_min = df_filtered.groupby("Importador")['Unitario Divisa'].idxmin()
-                    df_min_prices = df_filtered.loc[idx_min, ['Importador', 'Unitario Divisa', 'Fecha', 'País de Origen']]
+                    # Agrupación compuesta por importador y divisa
+                    agrupacion_base = ["Importador", "Moneda Divisa"]
                     
-                    df_agg = df_filtered.groupby("Importador").apply(
+                    idx_min = df_filtered.groupby(agrupacion_base)['Unitario Divisa'].idxmin()
+                    df_min_prices = df_filtered.loc[idx_min, agrupacion_base + ['Marca - Sufijos', 'Unitario Divisa', 'Fecha', 'País de Origen']]
+                    
+                    df_agg = df_filtered.groupby(agrupacion_base).apply(
                         lambda x: pd.Series({
                             'Unidades_Totales': x['Cantidad'].sum(),
-                            'Precio_Promedio_US': x['Valor_Total_Fila'].sum() / x['Cantidad'].sum() if x['Cantidad'].sum() > 0 else 0
+                            'Precio_Promedio': x['Valor_Total_Fila'].sum() / x['Cantidad'].sum() if x['Cantidad'].sum() > 0 else 0
                         })
                     ).reset_index()
                     
-                    resumen = pd.merge(df_agg, df_min_prices, on="Importador")
+                    resumen = pd.merge(df_agg, df_min_prices, on=agrupacion_base)
                     resumen["Fecha"] = resumen["Fecha"].dt.strftime('%d/%m/%Y')
                     
                     resumen = resumen.rename(columns={
                         "Importador": "Empresa Importadora",
+                        "Moneda Divisa": "Divisa",
+                        "Marca - Sufijos": "Marca",
                         "Unidades_Totales": "Unidades totales compradas (en rango)",
-                        "Unitario Divisa": "Precio Mínimo Registrado (U$S)",
-                        "Precio_Promedio_US": "Precio Promedio (U$S)",
+                        "Unitario Divisa": "Precio Mínimo Registrado",
+                        "Precio_Promedio": "Precio Promedio",
                         "Fecha": "Fecha de Compra Mínima",
                         "País de Origen": "País de Compra Mínima"
                     })
                     
                     column_order = [
-                        "Empresa Importadora", "Unidades totales compradas (en rango)",
-                        "Precio Promedio (U$S)", "Precio Mínimo Registrado (U$S)", 
+                        "Empresa Importadora", "Marca", "Divisa", "Unidades totales compradas (en rango)",
+                        "Precio Promedio", "Precio Mínimo Registrado", 
                         "Fecha de Compra Mínima", "País de Compra Mínima"
                     ]
                     resumen = resumen[column_order]
                     
-                    # Formateo visual (UX)
+                    # Formateo sin símbolo fijo de moneda (depende de la columna Divisa)
                     formato_resumen = {
-                        "Unidades totales compradas (en rango)": "{:,.0f}", # Sin decimales
-                        "Precio Promedio (U$S)": "${:,.2f}",
-                        "Precio Mínimo Registrado (U$S)": "${:,.2f}"
+                        "Unidades totales compradas (en rango)": "{:,.0f}",
+                        "Precio Promedio": "{:,.2f}",
+                        "Precio Mínimo Registrado": "{:,.2f}"
                     }
                     
                     st.dataframe(resumen.style.format(formato_resumen), use_container_width=True, hide_index=True)
@@ -193,18 +190,20 @@ with tab_consulta:
                     df_display = df_filtered.drop(columns=['Valor_Total_Fila']).copy()
                     df_display["Fecha"] = df_display["Fecha"].dt.strftime('%d/%m/%Y')
                     
-                    min_global = df_display['Unitario Divisa'].min()
+                    # Diccionario con el precio mínimo local para cada divisa
+                    minimos_por_divisa = df_display.groupby('Moneda Divisa')['Unitario Divisa'].min().to_dict()
                     
                     def highlight_min_row(row):
-                        if row['Unitario Divisa'] == min_global:
+                        divisa = row['Moneda Divisa']
+                        # Se resalta si el precio de la fila es igual al mínimo registrado para su divisa
+                        if row['Unitario Divisa'] == minimos_por_divisa.get(divisa):
                             return ['background-color: rgba(46, 204, 113, 0.3)'] * len(row)
                         return [''] * len(row)
                     
-                    # Formateo visual para el detalle (UX)
                     formato_detalle = {
-                        "Cantidad": "{:,.0f}", # Sin decimales
-                        "Unitario Divisa": "${:,.2f}",
-                        "FOB Divisa": "${:,.2f}"
+                        "Cantidad": "{:,.0f}",
+                        "Unitario Divisa": "{:,.2f}",
+                        "FOB Divisa": "{:,.2f}"
                     }
                     
                     styled_df = df_display.style.apply(highlight_min_row, axis=1).format(formato_detalle)
